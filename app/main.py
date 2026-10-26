@@ -3,6 +3,7 @@ main.py — La API HTTP (FastAPI) y el arranque/apagado del sistema.
 """
 
 import asyncio
+from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -10,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 
 from app import estado as registro
 from app.cola import iniciar_workers
-from app.modelos import Tarea, TareaRequest
+from app.modelos import EstadoTarea, Tarea, TareaRequest
 
 NUM_WORKERS = 4
 TAMANO_COLA = 100
@@ -57,4 +58,28 @@ async def obtener_tarea(tarea_id: str) -> Tarea:
     tarea = registro.obtener_tarea(tarea_id)
     if tarea is None:
         raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    return tarea
+
+
+@app.delete("/tareas/{tarea_id}")
+async def cancelar_tarea(tarea_id: str) -> Tarea:
+    tarea = registro.obtener_tarea(tarea_id)
+    if tarea is None:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+
+    if tarea.estado == EstadoTarea.PENDIENTE:
+        # Sigue en la cola: la marcamos y el worker la va a saltear al sacarla.
+        tarea.estado = EstadoTarea.CANCELADA
+        tarea.error = "Cancelada"
+        tarea.finalizada_en = datetime.now()
+    elif tarea.estado == EstadoTarea.EJECUTANDO:
+        interna = registro.obtener_asyncio_task(tarea_id)
+        if interna is not None:
+            interna.cancel()
+            # Esperamos a que termine de cancelarse: así respondemos con el estado real.
+            await asyncio.wait({interna})
+    else:
+        raise HTTPException(
+            status_code=409, detail=f"La tarea ya terminó ({EstadoTarea(tarea.estado).value})"
+        )
     return tarea
