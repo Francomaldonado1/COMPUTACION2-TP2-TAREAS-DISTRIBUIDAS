@@ -11,9 +11,11 @@ from fastapi import FastAPI, HTTPException
 
 from app import estado as registro
 from app.cola import iniciar_workers
+from app import tareas
 from app.modelos import EstadoTarea, Tarea, TareaRequest
 
 NUM_WORKERS = 4
+PROCESOS_CPU = 2
 TAMANO_COLA = 100
 
 
@@ -21,12 +23,14 @@ TAMANO_COLA = 100
 async def ciclo_de_vida(app: FastAPI):
     # Arranque: se crea la cola y los workers DENTRO del event loop ya corriendo.
     app.state.cola = asyncio.Queue(maxsize=TAMANO_COLA)
+    tareas.iniciar_pool(PROCESOS_CPU)
     app.state.workers = iniciar_workers(NUM_WORKERS, app.state.cola)
     yield
     # Apagado: cancelamos los workers y esperamos a que terminen.
     for w in app.state.workers:
         w.cancel()
     await asyncio.gather(*app.state.workers, return_exceptions=True)
+    tareas.cerrar_pool()
 
 
 app = FastAPI(title="Plataforma de Tareas Distribuidas", lifespan=ciclo_de_vida)
@@ -83,3 +87,11 @@ async def cancelar_tarea(tarea_id: str) -> Tarea:
             status_code=409, detail=f"La tarea ya terminó ({EstadoTarea(tarea.estado).value})"
         )
     return tarea
+
+
+if __name__ == "__main__":
+    # La guarda es obligatoria: en macOS/Windows ProcessPoolExecutor re-importa
+    # este módulo en cada proceso hijo y sin ella se entra en un bucle.
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
