@@ -22,7 +22,10 @@ async def ejecutar(tarea: Tarea) -> None:
     tarea.iniciada_en = datetime.now()
     try:
         funcion = EJECUTORES[tarea.tipo]
-        tarea.resultado = await funcion(tarea.parametros)
+        # wait_for cancela la corrutina si pasa el timeout (None = sin límite).
+        tarea.resultado = await asyncio.wait_for(
+            funcion(tarea.parametros), timeout=tarea.timeout
+        )
         tarea.estado = EstadoTarea.COMPLETADA
     except asyncio.CancelledError:
         # CancelledError NO es Exception: hay que capturarla explícitamente.
@@ -30,6 +33,9 @@ async def ejecutar(tarea: Tarea) -> None:
         tarea.estado = EstadoTarea.CANCELADA
         tarea.error = "Cancelada"
         raise
+    except asyncio.TimeoutError:
+        tarea.estado = EstadoTarea.FALLIDA
+        tarea.error = f"Timeout: superó el límite de {tarea.timeout} segundos"
     except Exception as e:
         tarea.estado = EstadoTarea.FALLIDA
         tarea.error = f"{type(e).__name__}: {e}"
