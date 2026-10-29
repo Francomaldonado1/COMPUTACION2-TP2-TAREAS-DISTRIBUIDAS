@@ -7,8 +7,11 @@ Son corrutinas: los workers las ejecutan con await.
 
 import asyncio
 import hashlib
+import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any
+
+import httpx
 
 # Pool de procesos para las tareas CPU-bound. Se crea una sola vez al arrancar
 # (ver main.py) y se reutiliza: crear un pool por pedido sería carísimo.
@@ -49,9 +52,39 @@ async def hashear(parametros: dict[str, Any]) -> str:
     )
 
 
+async def _descargar_una(cliente: httpx.AsyncClient, url: str) -> dict[str, Any]:
+    """Descarga una URL y devuelve código de estado, tamaño y tiempo.
+    Si falla, devuelve el error en vez de romper las demás descargas."""
+    inicio = time.perf_counter()
+    try:
+        respuesta = await cliente.get(url)
+        return {
+            "url": url,
+            "status": respuesta.status_code,
+            "bytes": len(respuesta.content),
+            "tiempo_s": round(time.perf_counter() - inicio, 3),
+        }
+    except httpx.HTTPError as e:
+        return {
+            "url": url,
+            "error": f"{type(e).__name__}: {e}",
+            "tiempo_s": round(time.perf_counter() - inicio, 3),
+        }
+
+
+async def descargar(parametros: dict[str, Any]) -> list[dict[str, Any]]:
+    """I/O-bound: todas las URLs a la vez. Tarda lo que la más lenta, no la suma."""
+    urls = parametros["urls"]
+    if not isinstance(urls, list) or not urls:
+        raise ValueError("'urls' debe ser una lista no vacía")
+    # 'async with' cierra las conexiones aunque nos cancelen a mitad de camino.
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cliente:
+        return await asyncio.gather(*(_descargar_una(cliente, u) for u in urls))
+
+
 # Despacho: tipo de tarea -> función que la ejecuta.
-# Cuando agreguemos descargar, solo hay que sumarla acá.
 EJECUTORES = {
     "esperar": esperar,
     "hashear": hashear,
+    "descargar": descargar,
 }
