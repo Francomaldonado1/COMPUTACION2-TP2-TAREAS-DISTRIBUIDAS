@@ -3,6 +3,7 @@ main.py — La API HTTP (FastAPI) y el arranque/apagado del sistema.
 """
 
 import asyncio
+import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -10,27 +11,53 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 
 from app import estado as registro
+from app import persistencia, tareas
 from app.cola import iniciar_workers
-from app import tareas
 from app.modelos import EstadoTarea, Tarea, TareaRequest
 
 NUM_WORKERS = 4
 PROCESOS_CPU = 2
 TAMANO_COLA = 100
+# Segundos que esperamos a las tareas en curso al apagar, antes de cancelarlas.
+GRACE_APAGADO = float(os.getenv("GRACE_APAGADO", "10"))
 
 
 @asynccontextmanager
 async def ciclo_de_vida(app: FastAPI):
     # Arranque: se crea la cola y los workers DENTRO del event loop ya corriendo.
+    persistencia.reportar_volcado_previo()
+    app.state.aceptando = True
     app.state.cola = asyncio.Queue(maxsize=TAMANO_COLA)
     tareas.iniciar_pool(PROCESOS_CPU)
     app.state.workers = iniciar_workers(NUM_WORKERS, app.state.cola)
     yield
-    # Apagado: cancelamos los workers y esperamos a que terminen.
+    # Apagado ordenado (uvicorn llega acá con SIGTERM o SIGINT).
+    app.state.aceptando = False
+    await _apagar(app)
+
+
+async def _apagar(app: FastAPI) -> None:
+    # 1) Las pendientes no arrancan: las sacamos de la cola (quedan 'pendiente').
+    while not app.state.cola.empty():
+        app.state.cola.get_nowait()
+        app.state.cola.task_done()
+    # 2) Esperamos, con límite, a las que están ejecutando.
+    en_curso = registro.tareas_en_curso()
+    if en_curso:
+        _, colgadas = await asyncio.wait(en_curso, timeout=GRACE_APAGADO)
+        # 3) Las que no terminaron a tiempo se cancelan (quedan 'cancelada').
+        for t in colgadas:
+            t.cancel()
+        if colgadas:
+            await asyncio.wait(colgadas)
+    # 4) Ya no queda trabajo: cerramos workers y pool.
     for w in app.state.workers:
         w.cancel()
     await asyncio.gather(*app.state.workers, return_exceptions=True)
     tareas.cerrar_pool()
+    # 5) Volcamos el estado final a disco.
+    ruta = persistencia.volcar_estado()
+    persistencia.log.info("Estado volcado en %s", ruta)
 
 
 app = FastAPI(title="Plataforma de Tareas Distribuidas", lifespan=ciclo_de_vida)
@@ -43,6 +70,8 @@ async def crear_tarea(pedido: TareaRequest) -> Tarea:
         parametros=pedido.parametros,
         timeout=pedido.timeout,
     )
+    if not app.state.aceptando:
+        raise HTTPException(status_code=503, detail="El servidor se está apagando")
     registro.registrar_tarea(tarea)
     try:
         # put_nowait: si la cola está llena respondemos 503 en vez de colgar al cliente.
@@ -87,6 +116,11 @@ async def cancelar_tarea(tarea_id: str) -> Tarea:
             status_code=409, detail=f"La tarea ya terminó ({EstadoTarea(tarea.estado).value})"
         )
     return tarea
+
+
+@app.get("/estadisticas")
+async def estadisticas() -> dict:
+    return registro.calcular_estadisticas(NUM_WORKERS)
 
 
 if __name__ == "__main__":

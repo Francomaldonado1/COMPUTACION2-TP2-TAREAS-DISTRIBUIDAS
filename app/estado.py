@@ -14,7 +14,7 @@ Guardamos dos cosas separadas:
 from typing import Optional
 import asyncio
 
-from app.modelos import Tarea
+from app.modelos import EstadoTarea, Tarea, TipoTarea
 
 
 # Diccionario principal: id → Tarea
@@ -56,3 +56,32 @@ def obtener_asyncio_task(tarea_id: str) -> Optional[asyncio.Task]:
 def limpiar_asyncio_task(tarea_id: str) -> None:
     """Elimina el asyncio.Task del registro cuando la tarea ya terminó."""
     _asyncio_tasks.pop(tarea_id, None)
+
+
+def tareas_en_curso() -> list[asyncio.Task]:
+    """Los asyncio.Task que todavía no terminaron (para el apagado ordenado)."""
+    return [t for t in _asyncio_tasks.values() if not t.done()]
+
+
+def calcular_estadisticas(workers_totales: int) -> dict:
+    """Totales por estado, tiempos promedio de las completadas y workers ocupados."""
+    por_estado = {e.value: 0 for e in EstadoTarea}
+    duraciones: dict[str, list[float]] = {}
+    for t in tareas.values():
+        estado = EstadoTarea(t.estado).value
+        por_estado[estado] += 1
+        if estado == EstadoTarea.COMPLETADA.value:
+            segundos = (t.finalizada_en - t.iniciada_en).total_seconds()
+            duraciones.setdefault(TipoTarea(t.tipo).value, []).append(segundos)
+
+    todas = [d for lista in duraciones.values() for d in lista]
+    return {
+        "total": len(tareas),
+        "por_estado": por_estado,
+        "tiempo_promedio_s": round(sum(todas) / len(todas), 3) if todas else None,
+        "tiempo_promedio_por_tipo_s": {
+            tipo: round(sum(l) / len(l), 3) for tipo, l in duraciones.items()
+        },
+        "workers_ocupados": por_estado[EstadoTarea.EJECUTANDO.value],
+        "workers_totales": workers_totales,
+    }
