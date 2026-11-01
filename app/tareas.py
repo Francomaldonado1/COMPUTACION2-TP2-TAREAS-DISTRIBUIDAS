@@ -7,6 +7,7 @@ Son corrutinas: los workers las ejecutan con await.
 
 import asyncio
 import hashlib
+import os
 import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any
@@ -46,6 +47,10 @@ def _hash_iterado(texto: str, iteraciones: int) -> str:
 
 async def hashear(parametros: dict[str, Any]) -> str:
     """CPU-bound: se delega a un proceso aparte para NO bloquear el event loop."""
+    if os.getenv("SIN_EXECUTOR") == "1":
+        # SOLO PARA MEDICIÓN (mediciones/medicion_2_loop.py): ejecuta el cálculo
+        # directo en el event loop para mostrar cómo lo congela. No usar en serio.
+        return _hash_iterado(parametros["texto"], parametros["iteraciones"])
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _pool, _hash_iterado, parametros["texto"], parametros["iteraciones"]
