@@ -132,10 +132,43 @@ Primera versión, a reescribir y ampliar con mis palabras 🚧
 
 ## 5. Mediciones 🚧
 
-1. Concurrencia I/O: 20 descargas secuenciales contra 20 concurrentes.
-2. Event loop bloqueado: latencia de `GET /tareas` durante una tarea CPU-bound, sin y
-   con executor.
-3. Techo del pool: hasta dónde escala antes de degradarse.
+Se reproducen con `python mediciones/medicion_1_io.py` y
+`python mediciones/medicion_2_loop.py` (con el `venv` activado).
+
+### 5.1 Concurrencia I/O
+
+20 descargas de 1 segundo cada una, contra un servidor local:
+
+| Forma | Tiempo |
+|-------|--------|
+| Secuencial (`for` + `await`) | 20.18 s |
+| Concurrente (`asyncio.gather`) | 1.05 s |
+| **Speedup** | **19.3x** |
+
+🚧 Interpretación (con mis palabras): ¿por qué ~1 s y no 20 s? ¿Por qué el speedup no
+es exactamente 20x?
+
+> Nota: en una primera corrida la versión concurrente tardó 2 s. La causa era el
+> servidor de prueba, no el cliente: `socketserver` tiene un backlog de 5 conexiones
+> por defecto (`request_queue_size`), y con 20 conexiones simultáneas las que no
+> entraban se reintentaban al segundo. Ampliando el backlog se estabilizó en ~1 s.
+
+### 5.2 El event loop bloqueado
+
+Hash SHA-256 de 10.000.000 de iteraciones; se mide cuánto tarda un
+`GET /tareas/<id>` hecho mientras corre:
+
+| | GETs medidos | Latencia máxima | Latencia promedio |
+|-|--------------|-----------------|-------------------|
+| Sin executor (en el event loop) | 1 | 4640.6 ms | 4640.6 ms |
+| Con `run_in_executor` | 47 | 37.4 ms | 3.1 ms |
+
+🚧 Interpretación (con mis palabras): ¿por qué un solo GET medido sin executor?
+¿Qué pasa con el event loop durante esos ~4.6 s?
+
+### 5.3 Techo del pool 🚧
+
+Hasta dónde escala antes de degradarse.
 
 ## 6. Conceptos del curso aplicados 🚧
 
