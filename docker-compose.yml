@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Dónde se escribe estado_<timestamp>.json (montado como volumen)
+      DIRECTORIO_ESTADO: /datos
+      # Segundos que esperamos a las tareas en curso al apagar
+      GRACE_APAGADO: "10"
+    volumes:
+      - ./datos:/datos
+    # Docker manda SIGKILL si el contenedor no termina a tiempo (por defecto, 10 s).
+    # Tiene que ser MAYOR que GRACE_APAGADO, o el volcado se corta a la mitad.
+    stop_grace_period: 20s
+    restart: unless-stopped

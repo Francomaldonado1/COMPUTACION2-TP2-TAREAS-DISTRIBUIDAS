@@ -1,0 +1,8 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+pruebas.py
+prompt_tutor_ia.md
+estado_*.json
+datos/
