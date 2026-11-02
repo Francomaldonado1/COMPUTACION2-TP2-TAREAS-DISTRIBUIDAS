@@ -165,8 +165,14 @@ Se reproducen con `python mediciones/medicion_1_io.py` y
 | Concurrente (`asyncio.gather`) | 1.05 s |
 | **Speedup** | **19.3x** |
 
-🚧 Interpretación (con mis palabras): ¿por qué ~1 s y no 20 s? ¿Por qué el speedup no
-es exactamente 20x?
+Con `asyncio.gather` las 20 corrutinas se lanzan juntas: cada una manda su pedido y se
+pausa en el `await` mientras espera la respuesta, y el event loop aprovecha esa espera
+para arrancar las demás. Como las esperas se solapan, el total es lo que tarda la
+descarga más lenta (~1 s) y no la suma. Con `for` + `await` no se pide la siguiente hasta
+terminar la anterior, así que las esperas se suman (20 s). El speedup (19,3x) no llega a
+20x porque la versión concurrente tiene un costo de organización de ~0,05 s (abrir las
+conexiones, crear y planificar las corrutinas, procesar las respuestas, todo en un solo
+hilo), que pesa un 5% sobre un total de apenas ~1 s.
 
 > Nota: en una primera corrida la versión concurrente tardó 2 s. La causa era el
 > servidor de prueba, no el cliente: `socketserver` tiene un backlog de 5 conexiones
