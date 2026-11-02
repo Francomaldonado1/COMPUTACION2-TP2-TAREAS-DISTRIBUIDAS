@@ -15,9 +15,10 @@ from app import persistencia, tareas
 from app.cola import iniciar_workers
 from app.modelos import EstadoTarea, Tarea, TareaRequest
 
-NUM_WORKERS = 4
+# Configurables por entorno (los usa mediciones/medicion_3_techo.py); si no, estos valores.
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 PROCESOS_CPU = 2
-TAMANO_COLA = 100
+TAMANO_COLA = int(os.getenv("TAMANO_COLA", "100"))
 # Segundos que esperamos a las tareas en curso al apagar, antes de cancelarlas.
 GRACE_APAGADO = float(os.getenv("GRACE_APAGADO", "10"))
 
@@ -72,12 +73,15 @@ async def crear_tarea(pedido: TareaRequest) -> Tarea:
     )
     if not app.state.aceptando:
         raise HTTPException(status_code=503, detail="El servidor se está apagando")
-    registro.registrar_tarea(tarea)
     try:
         # put_nowait: si la cola está llena respondemos 503 en vez de colgar al cliente.
         app.state.cola.put_nowait(tarea)
     except asyncio.QueueFull:
         raise HTTPException(status_code=503, detail="Cola llena, reintentá más tarde")
+    # Se registra RECIÉN ahora: si la cola estaba llena no queda una tarea fantasma
+    # 'pendiente' que nadie va a ejecutar. No hay un await entre put y registro, así
+    # que ningún worker puede sacar la tarea antes de que esté registrada.
+    registro.registrar_tarea(tarea)
     return tarea
 
 
