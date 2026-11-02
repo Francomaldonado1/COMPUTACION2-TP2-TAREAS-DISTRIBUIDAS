@@ -189,8 +189,16 @@ Hash SHA-256 de 10.000.000 de iteraciones; se mide cuánto tarda un
 | Sin executor (en el event loop) | 1 | 4640.6 ms | 4640.6 ms |
 | Con `run_in_executor` | 47 | 37.4 ms | 3.1 ms |
 
-🚧 Interpretación (con mis palabras): ¿por qué un solo GET medido sin executor?
-¿Qué pasa con el event loop durante esos ~4.6 s?
+Sin executor, el cálculo corre dentro de la corrutina `hashear`, es decir, en el mismo
+hilo que el event loop. Como `_hash_iterado` es un `for` de 10 millones de vueltas sin
+ningún `await`, el loop no recupera el control durante ~4,6 s, y no puede atender ningún
+pedido: el primer `GET` queda esperando todo ese tiempo, y por eso se mide una sola
+latencia (4640 ms). Con `run_in_executor`, el cálculo corre en otro proceso del
+`ProcessPoolExecutor` y la corrutina del worker queda pausada en el `await`, así que el
+event loop sigue libre: cada `GET` responde en ~3 ms y, como el script espera 0,1 s entre
+consultas, da unas 47 vueltas mientras dura el hash. Se usa un proceso y no un hilo por el
+GIL: dos hilos de un mismo proceso se turnan para ejecutar código Python, mientras que
+cada proceso tiene el suyo y puede usar un núcleo propio.
 
 ### 5.3 Techo del pool
 
@@ -265,3 +273,10 @@ Borrador: revisar y reescribir con mis palabras 🚧
 - `hashear` con `SIN_EXECUTOR=1` existe solo para la medición 2 y bloquea el loop a propósito.
 
 ## 8. Lo que aprendí 🚧
+
+Notas para ir armando esta sección (2 o 3 párrafos personales al final):
+
+- **El GIL.** No sabía que el GIL (Global Interpreter Lock) hace que, dentro de un mismo
+  proceso, un solo hilo ejecute código Python a la vez. Por eso un hilo no sirve para
+  trabajo CPU-bound y hace falta un proceso aparte (`ProcessPoolExecutor`), que tiene su
+  propio GIL y puede usar otro núcleo.
