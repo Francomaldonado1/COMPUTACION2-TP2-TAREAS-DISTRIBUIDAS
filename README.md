@@ -108,7 +108,7 @@ Flujo de una tarea:
 
 ## 4. Decisiones de diseño
 
-Primera versión, a reescribir y ampliar con mis palabras 🚧
+Borrador técnico: revisar y reescribir con mis palabras 🚧
 
 - **Estado en un dict simple, sin locks.** La API y los workers corren en el mismo hilo
   (el event loop) y comparten memoria. El event loop solo cambia de corrutina en los
@@ -120,15 +120,35 @@ Primera versión, a reescribir y ampliar con mis palabras 🚧
   puede escribir como JSON.
 - **CPU-bound fuera del event loop.** `hashear` corre en un `ProcessPoolExecutor`. Si se
   ejecutara dentro de la corrutina, congelaría el event loop y toda la API. Se eligen
-  procesos y no threads por el GIL. 🚧 completar con la medición 2.
+  procesos y no threads por el GIL. La medición 2 lo muestra: durante un hash de 10 M de iteraciones, un `GET`
+  tarda 4640 ms sin executor y 3 ms con él.
 - **Cancelación.** `DELETE` sobre una tarea pendiente la marca `cancelada` y el worker
   la saltea; sobre una en ejecución llama a `Task.cancel()`, y el `CancelledError`
-  se captura para dejar el estado final y se relanza. 🚧 explicar recursos a medio usar.
+  se captura para dejar el estado final y se relanza (si se tragara, la tarea interna
+  terminaría "normal" y el worker no se enteraría de la cancelación). Cada tarea corre en
+  su propio `asyncio.Task` y el worker la espera con `asyncio.wait`, que no relanza la
+  cancelación de la tarea interna: así `DELETE` mata a la tarea sin matar al worker. Los
+  recursos a medio usar se liberan con `async with` / `finally`; por ejemplo, el cliente
+  `httpx` de `descargar` cierra sus conexiones aunque se cancele a mitad de descarga.
 - **Excepciones en tareas.** `ejecutar()` captura cualquier `Exception` y deja la tarea
   `fallida` con el motivo, así que el worker sigue vivo y atiende la siguiente.
 - **Cola con tamaño máximo** (100) y `put_nowait`: si se llena, la API responde 503 en
   vez de dejar colgado al cliente (backpressure).
-- 🚧 ¿Por qué `asyncio.Queue` y no `queue.Queue`?
+- **Timeouts con `asyncio.wait_for`.** Cada tarea corre dentro de `wait_for(..., timeout)`;
+  al vencer, cancela la corrutina y la tarea queda `fallida` con el motivo. Con
+  `timeout=None` no hay límite.
+- **¿Por qué `asyncio.Queue` y no `queue.Queue`?** `queue.Queue.get()` bloquea el hilo
+  mientras espera; en un worker corrutina eso congelaría el event loop entero. En cambio
+  `asyncio.Queue.get()` es una corrutina: mientras no hay trabajo, cede el control con un
+  `await` y el loop sigue atendiendo otras cosas. 🚧 completar
+- **Registro después de encolar.** El `POST` primero hace `put_nowait` y recién después
+  registra la tarea. Al revés (como estaba al principio), una cola llena dejaba una tarea
+  `pendiente` fantasma que nadie ejecutaba; lo descubrió la medición 3.
+- **Apagado ordenado en el `lifespan`.** Uvicorn captura `SIGTERM` y `SIGINT` y ejecuta el
+  apagado del `lifespan`: se dejan de aceptar tareas, las pendientes no arrancan, se espera
+  con límite a las que están en curso, las que no terminan se cancelan y se vuelca el estado.
+  En Docker, `stop_grace_period` (20 s) tiene que ser mayor que `GRACE_APAGADO` (10 s), o
+  Docker mata el proceso con `SIGKILL` antes de que termine el volcado.
 
 ## 5. Mediciones 🚧
 
@@ -166,11 +186,61 @@ Hash SHA-256 de 10.000.000 de iteraciones; se mide cuánto tarda un
 🚧 Interpretación (con mis palabras): ¿por qué un solo GET medido sin executor?
 ¿Qué pasa con el event loop durante esos ~4.6 s?
 
-### 5.3 Techo del pool 🚧
+### 5.3 Techo del pool
 
-Hasta dónde escala antes de degradarse.
+Se mandan N tareas `esperar` de 1 segundo **de golpe** y se mide cuántas entran, cuánto
+tardan en terminar y cuánto demora un `GET` durante la carga. `mediciones/medicion_3_techo.py`
+levanta la API con distintas configuraciones (`NUM_WORKERS` y `TAMANO_COLA` son variables
+de entorno). Con W workers, N tareas de 1 s deberían tardar `ceil(N / W)` segundos.
 
-## 6. Conceptos del curso aplicados 🚧
+| Workers | Cola | N enviadas | Aceptadas | Rechazadas (503) | Total (s) | Esperado (s) | GET máx (ms) |
+|--------:|-----:|-----------:|----------:|-----------------:|----------:|-------------:|-------------:|
+| 4 | 100 | 4 | 4 | 0 | 1.09 | 1 | 6.4 |
+| 4 | 100 | 20 | 20 | 0 | 5.06 | 5 | 7.4 |
+| 4 | 100 | 100 | 100 | 0 | 25.14 | 25 | 9.9 |
+| 4 | 100 | 150 | 104 | 46 | 26.24 | 26 | 9.6 |
+| 50 | 200 | 50 | 50 | 0 | 1.14 | 1 | 4.6 |
+| 50 | 200 | 200 | 200 | 0 | 4.21 | 4 | 7.9 |
+| 50 | 200 | 400 | 250 | 150 | 5.40 | 5 | 17.8 |
+| 1000 | 5000 | 1000 | 1000 | 0 | 3.96 | 1 | 12.1 |
+| 1000 | 5000 | 3000 | 3000 | 0 | 10.65 | 3 | 24.0 |
+| 1000 | 5000 | 5000 | 5000 | 0 | 18.34 | 5 | 46.4 |
+
+Qué muestran los datos (borrador, a reescribir con mis palabras 🚧):
+
+- **Mientras haya pocos workers, el techo es el pool.** Con 4 y 50 workers el tiempo
+  coincide con `ceil(N / W)`: el rendimiento es "W tareas por segundo".
+- **Hay un tope de tareas aceptadas: cola + workers.** Con 4 workers y cola de 100 entran
+  104 de 150; con 50 y 200 entran 250 de 400. El resto recibe 503 (backpressure): se
+  prefiere rechazar a acumular tareas sin límite en memoria.
+- **Con muchos workers el techo pasa a ser la API.** Con 1000 workers alcanzaría 1 s para
+  1000 tareas, pero tarda ~4 s. El tiempo coincide con lo que tarda el `POST` en recibir
+  todas las tareas (2.9 s para 1000, 17.1 s para 5000: ~300 a 350 pedidos por segundo),
+  más 1 s de la última. El cuello de botella es el único event loop atendiendo HTTP, no
+  los workers. La latencia del `GET` también sube (6 → 46 ms) porque el loop está más
+  ocupado.
+- **Salvedad:** el generador de carga corre en la misma máquina que el servidor, así que
+  comparten CPU y las cifras absolutas son más bajas que en un escenario real.
+
+## 6. Conceptos del curso aplicados
+
+Borrador: revisar y reescribir con mis palabras 🚧
+
+| Dónde en el código | Concepto | Clase |
+|--------------------|----------|-------|
+| Los workers (`cola.py`) son corrutinas en un solo hilo; `await` cede el control al loop | Event loop, corrutinas, `async`/`await` | 18 |
+| Uvicorn atiende muchas conexiones en un hilo, con `epoll` por debajo | I/O multiplexing | 17 |
+| Endpoints, validación con Pydantic, códigos 201/404/409/503 | HTTP y FastAPI | 19 |
+| `descargar`: `httpx` async + `gather`; 20 descargas en 1 s en vez de 20 s | Asyncio en red, clientes concurrentes | 20 |
+| `wait_for` para timeouts; `Task.cancel()` + `CancelledError` para cancelar | Timeouts y cancelación | 20 |
+| El pool de workers consume una `asyncio.Queue` compartida | Productor-consumidor, igual que la clase 11 pero con corrutinas | 21 (y 11) |
+| El dict `tareas` se comparte sin `Lock`: el loop solo cambia de corrutina en los `await` | Por qué asyncio no necesita locks | 20 |
+| `hashear` con `run_in_executor` sobre un `ProcessPoolExecutor` único | Trabajo CPU-bound fuera del loop; threads vs procesos (GIL) | 21 y 22 |
+| El pool de procesos se crea una sola vez al arrancar | Un pool por pedido sería un error clásico | 22 |
+| `lifespan` y `async with` | Context managers (asíncronos) | Bloque 0 |
+| `SIGTERM`/`SIGINT` provocan el volcado a JSON | Señales | 6 |
+| `Dockerfile`, `docker-compose.yml`, volumen para los volcados | Docker | 1 y 2 |
+| El backlog de 5 conexiones del servidor de prueba inflaba la medición 1 | `listen()` y `request_queue_size` | 13 y 16 |
 
 ## 7. Limitaciones conocidas
 
@@ -181,5 +251,11 @@ Hasta dónde escala antes de degradarse.
 - Un `hashear` que ya está calculando no se puede interrumpir: cancelarlo o vencer su
   timeout lo marca `cancelada` / `fallida`, pero el proceso del pool sigue usando CPU
   hasta terminar.
+- Un solo proceso y un solo event loop atienden todo el HTTP: la medición 3 muestra un
+  techo de ~300 a 350 pedidos por segundo. Para escalar más habría que correr varias
+  instancias detrás de un balanceador (y entonces el estado en memoria ya no alcanza).
+- El estado crece sin límite: las tareas terminadas nunca se borran de memoria.
+- `NUM_WORKERS` y `PROCESOS_CPU` son fijos al arrancar; no se ajustan en caliente.
+- `hashear` con `SIN_EXECUTOR=1` existe solo para la medición 2 y bloquea el loop a propósito.
 
 ## 8. Lo que aprendí 🚧
