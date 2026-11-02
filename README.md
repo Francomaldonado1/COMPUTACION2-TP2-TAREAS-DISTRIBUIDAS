@@ -220,21 +220,26 @@ de entorno). Con W workers, N tareas de 1 s deberían tardar `ceil(N / W)` segun
 | 1000 | 5000 | 3000 | 3000 | 0 | 10.65 | 3 | 24.0 |
 | 1000 | 5000 | 5000 | 5000 | 0 | 18.34 | 5 | 46.4 |
 
-Qué muestran los datos (borrador, a reescribir con mis palabras 🚧):
+Mientras haya pocos workers, el techo es el pool: con 4 y con 50 workers el tiempo
+coincide con `ceil(N / W)`, es decir, se completan W tareas por segundo. Además hay un
+tope de tareas aceptadas, igual a las que se están ejecutando más los lugares de la cola
+(4 + 100 = 104 de 150; 50 + 200 = 250 de 400). Las que llegan con la cola llena reciben un
+503 y no se registran: se prefiere rechazar a acumular tareas sin límite en memoria.
 
-- **Mientras haya pocos workers, el techo es el pool.** Con 4 y 50 workers el tiempo
-  coincide con `ceil(N / W)`: el rendimiento es "W tareas por segundo".
-- **Hay un tope de tareas aceptadas: cola + workers.** Con 4 workers y cola de 100 entran
-  104 de 150; con 50 y 200 entran 250 de 400. El resto recibe 503 (backpressure): se
-  prefiere rechazar a acumular tareas sin límite en memoria.
-- **Con muchos workers el techo pasa a ser la API.** Con 1000 workers alcanzaría 1 s para
-  1000 tareas, pero tarda ~4 s. El tiempo coincide con lo que tarda el `POST` en recibir
-  todas las tareas (2.9 s para 1000, 17.1 s para 5000: ~300 a 350 pedidos por segundo),
-  más 1 s de la última. El cuello de botella es el único event loop atendiendo HTTP, no
-  los workers. La latencia del `GET` también sube (6 → 46 ms) porque el loop está más
-  ocupado.
-- **Salvedad:** el generador de carga corre en la misma máquina que el servidor, así que
-  comparten CPU y las cifras absolutas son más bajas que en un escenario real.
+Con muchos workers el techo cambia de lugar: con 1000 workers y 1000 tareas de 1 s el
+total fue de ~4 s en vez de 1 s, porque todos los `POST` pasan por un único event loop
+(un proceso, un hilo) que atiende unos 300 a 350 pedidos por segundo (2.9 s para 1000
+tareas, 17.1 s para 5000). Los 1000 `POST` tardaron 2.9 s en entrar y la última tarea 1 s
+más. Agregar workers no ayuda, porque el cuello de botella no está en los workers sino en
+la entrada. La latencia del `GET` también sube (6 → 46 ms) porque el loop está más ocupado.
+
+Para superar ese techo habría que correr varios procesos de la API (por ejemplo
+`uvicorn --workers N`), cada uno con su propio event loop; pero entonces cada proceso
+tendría su propio diccionario de tareas y el estado en memoria ya no se compartiría
+(ver limitaciones).
+
+Salvedad: el generador de carga corre en la misma máquina que el servidor y comparten
+CPU, así que los valores absolutos serían mejores en un escenario real.
 
 ## 6. Conceptos del curso aplicados
 
