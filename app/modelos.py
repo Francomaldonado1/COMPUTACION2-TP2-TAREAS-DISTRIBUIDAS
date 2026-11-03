@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EstadoTarea(str, Enum):
@@ -63,6 +63,5 @@ class Tarea(BaseModel):
     iniciada_en:  Optional[datetime] = None
     finalizada_en:Optional[datetime] = None
 
-    class Config:
-        # Permite que el modelo conviva con tipos no-Pydantic en el futuro
-        use_enum_values = True
+    # Guarda el valor ("pendiente") y no el Enum al validar
+    model_config = ConfigDict(use_enum_values=True)

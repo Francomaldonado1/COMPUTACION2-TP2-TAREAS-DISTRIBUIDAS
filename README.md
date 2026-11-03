@@ -55,6 +55,17 @@ curl localhost:8000/estadisticas              # totales, tiempos promedio, worke
 
 Estados: `pendiente` → `ejecutando` → `completada` | `fallida` | `cancelada`.
 
+### Configuración
+
+Variables de entorno (valores por defecto entre paréntesis):
+
+| Variable | Qué controla |
+|----------|--------------|
+| `NUM_WORKERS` (4) | Cantidad de workers (corrutinas) que consumen la cola |
+| `TAMANO_COLA` (100) | Lugares de la cola; con la cola llena, el `POST` responde 503 |
+| `GRACE_APAGADO` (10) | Segundos que se espera a las tareas en curso al apagar |
+| `DIRECTORIO_ESTADO` (`.`) | Carpeta donde se escribe `estado_<timestamp>.json` |
+
 ### Apagado ordenado
 
 `SIGTERM` / `SIGINT` (por ejemplo `docker compose stop`): se deja de aceptar tareas,
@@ -112,8 +123,13 @@ Borrador técnico: revisar y reescribir con mis palabras 🚧
 
 - **Estado en un dict simple, sin locks.** La API y los workers corren en el mismo hilo
   (el event loop) y comparten memoria. El event loop solo cambia de corrutina en los
-  `await`, así que ninguna operación sobre el dict se interrumpe a mitad de camino.
-  Contraste con el TP1, donde había procesos separados y hacía falta `Manager`/`mmap`.
+  `await`, así que ninguna operación sin `await` se interrumpe a mitad de camino: por
+  ejemplo, entre el `put_nowait` y el `registrar_tarea` del `POST` no hay ninguno, y
+  ningún worker puede sacar la tarea de la cola antes de que esté registrada. Con
+  threads, el cambio podría ocurrir entre cualquier par de instrucciones y haría falta
+  un `Lock`. Acá solo habría un problema si se pusiera un `await` en medio de una
+  sección crítica. Contraste con el TP1, donde había procesos separados y hacía falta
+  `Manager`/`mmap`.
 - **Dos diccionarios en `estado.py`.** `tareas` guarda datos serializables (lo que ven
   los `GET` y lo que va al JSON). `_asyncio_tasks` guarda los `asyncio.Task` en vivo,
   solo para poder cancelarlos: un `Task` envuelve una corrutina en ejecución y no se
@@ -122,25 +138,37 @@ Borrador técnico: revisar y reescribir con mis palabras 🚧
   ejecutara dentro de la corrutina, congelaría el event loop y toda la API. Se eligen
   procesos y no threads por el GIL. La medición 2 lo muestra: durante un hash de 10 M de iteraciones, un `GET`
   tarda 4640 ms sin executor y 3 ms con él.
-- **Cancelación.** `DELETE` sobre una tarea pendiente la marca `cancelada` y el worker
-  la saltea; sobre una en ejecución llama a `Task.cancel()`, y el `CancelledError`
-  se captura para dejar el estado final y se relanza (si se tragara, la tarea interna
-  terminaría "normal" y el worker no se enteraría de la cancelación). Cada tarea corre en
-  su propio `asyncio.Task` y el worker la espera con `asyncio.wait`, que no relanza la
-  cancelación de la tarea interna: así `DELETE` mata a la tarea sin matar al worker. Los
-  recursos a medio usar se liberan con `async with` / `finally`; por ejemplo, el cliente
-  `httpx` de `descargar` cierra sus conexiones aunque se cancele a mitad de descarga.
+- **Cancelación.** Hay dos casos. Si la tarea está `pendiente` (todavía en la cola),
+  `DELETE` solo la marca `cancelada` y el worker la saltea al sacarla: no hay nada
+  corriendo ni recursos abiertos. Si está `ejecutando`, `DELETE` llama a `Task.cancel()`,
+  que lanza `CancelledError` en el `await` donde estaba pausada. Ese error sube por la
+  corrutina: los `async with` y `finally` liberan los recursos (por ejemplo, el cliente
+  `httpx` de `descargar` cierra sus conexiones), y al llegar a `ejecutar()` se captura
+  para dejar el estado en `cancelada` y se relanza para que la cancelación termine bien.
+  `DELETE` espera con `asyncio.wait` a que esto ocurra y responde con el estado real.
+  Cada tarea corre en su propio `asyncio.Task` para poder cancelarla sin matar al worker.
 - **Excepciones en tareas.** `ejecutar()` captura cualquier `Exception` y deja la tarea
-  `fallida` con el motivo, así que el worker sigue vivo y atiende la siguiente.
+  `fallida` con el motivo, así que el worker sigue vivo y atiende la siguiente. Si aun así
+  escapara una excepción del bucle del worker, esa corrutina moriría sin ruido (Python
+  solo avisa "Task exception was never retrieved") y el pool quedaría con un worker menos,
+  sin reemplazo; está anotado en las limitaciones.
 - **Cola con tamaño máximo** (100) y `put_nowait`: si se llena, la API responde 503 en
   vez de dejar colgado al cliente (backpressure).
 - **Timeouts con `asyncio.wait_for`.** Cada tarea corre dentro de `wait_for(..., timeout)`;
   al vencer, cancela la corrutina y la tarea queda `fallida` con el motivo. Con
   `timeout=None` no hay límite.
 - **¿Por qué `asyncio.Queue` y no `queue.Queue`?** `queue.Queue.get()` bloquea el hilo
-  mientras espera; en un worker corrutina eso congelaría el event loop entero. En cambio
-  `asyncio.Queue.get()` es una corrutina: mientras no hay trabajo, cede el control con un
-  `await` y el loop sigue atendiendo otras cosas. 🚧 completar
+  entero mientras la cola está vacía. Como los workers son corrutinas y comparten hilo con
+  la API, el event loop quedaría congelado: no atendería ningún pedido y las tareas en
+  curso tampoco avanzarían. Además sería un deadlock, porque quien pone tareas en la cola
+  (el `POST`) vive en ese mismo loop bloqueado. En cambio `asyncio.Queue.get()` es una
+  corrutina: con la cola vacía el worker se pausa en un `await` y el loop sigue libre
+  para recibir pedidos.
+- **`httpx` en modo async para las descargas.** `requests` es síncrono: cada `get()`
+  bloquearía el event loop mientras espera la red, y las descargas dejarían de ser
+  concurrentes (además la consigna lo prohíbe). `httpx.AsyncClient` hace `await` en la
+  espera de red, así que el loop queda libre. Se eligió `httpx` y no `aiohttp` porque su
+  API es casi igual a la de `requests`, y porque soporta tanto modo sync como async.
 - **Registro después de encolar.** El `POST` primero hace `put_nowait` y recién después
   registra la tarea. Al revés (como estaba al principio), una cola llena dejaba una tarea
   `pendiente` fantasma que nadie ejecutaba; lo descubrió la medición 3.
@@ -273,6 +301,9 @@ Borrador: revisar y reescribir con mis palabras 🚧
 - Un solo proceso y un solo event loop atienden todo el HTTP: la medición 3 muestra un
   techo de ~300 a 350 pedidos por segundo. Para escalar más habría que correr varias
   instancias detrás de un balanceador (y entonces el estado en memoria ya no alcanza).
+- Si una excepción escapara del bucle de un worker, ese worker moriría y no se reemplaza
+  (el pool queda con uno menos). Hoy `ejecutar()` captura todo `Exception`, así que no
+  debería pasar, pero no hay un supervisor que lo repare.
 - El estado crece sin límite: las tareas terminadas nunca se borran de memoria.
 - `NUM_WORKERS` y `PROCESOS_CPU` son fijos al arrancar; no se ajustan en caliente.
 - `hashear` con `SIN_EXECUTOR=1` existe solo para la medición 2 y bloquea el loop a propósito.
