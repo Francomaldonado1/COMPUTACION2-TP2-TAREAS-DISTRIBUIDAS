@@ -4,9 +4,6 @@ TP2 de Computación II (Universidad de Mendoza, 2026). Un servicio HTTP al que s
 encargan trabajos, que los ejecuta de forma concurrente con asyncio y permite
 consultar su estado y resultado.
 
-> **Estado del documento:** borrador que se completa a medida que avanza el TP.
-> Las secciones marcadas con 🚧 todavía faltan.
-
 ## 1. Descripción y uso
 
 Se levanta con Docker:
@@ -119,8 +116,6 @@ Flujo de una tarea:
 
 ## 4. Decisiones de diseño
 
-Borrador técnico: revisar y reescribir con mis palabras 🚧
-
 - **Estado en un dict simple, sin locks.** La API y los workers corren en el mismo hilo
   (el event loop) y comparten memoria. El event loop solo cambia de corrutina en los
   `await`, así que ninguna operación sin `await` se interrumpe a mitad de camino: por
@@ -178,7 +173,7 @@ Borrador técnico: revisar y reescribir con mis palabras 🚧
   En Docker, `stop_grace_period` (20 s) tiene que ser mayor que `GRACE_APAGADO` (10 s), o
   Docker mata el proceso con `SIGKILL` antes de que termine el volcado.
 
-## 5. Mediciones 🚧
+## 5. Mediciones
 
 Se reproducen con `python mediciones/medicion_1_io.py` y
 `python mediciones/medicion_2_loop.py` (con el `venv` activado).
@@ -271,8 +266,6 @@ CPU, así que los valores absolutos serían mejores en un escenario real.
 
 ## 6. Conceptos del curso aplicados
 
-Borrador: revisar y reescribir con mis palabras 🚧
-
 | Dónde en el código | Concepto | Clase |
 |--------------------|----------|-------|
 | Los workers (`cola.py`) son corrutinas en un solo hilo; `await` cede el control al loop | Event loop, corrutinas, `async`/`await` | 18 |
@@ -308,11 +301,26 @@ Borrador: revisar y reescribir con mis palabras 🚧
 - `NUM_WORKERS` y `PROCESOS_CPU` son fijos al arrancar; no se ajustan en caliente.
 - `hashear` con `SIN_EXECUTOR=1` existe solo para la medición 2 y bloquea el loop a propósito.
 
-## 8. Lo que aprendí 🚧
+## 8. Lo que aprendí
 
-Notas para ir armando esta sección (2 o 3 párrafos personales al final):
+En el TP1 usé threads y necesité locks para proteger los datos compartidos, porque el
+sistema operativo puede cambiar de hilo entre cualquier par de instrucciones. Con asyncio
+entendí que el cambio de corrutina solo ocurre en un `await`, así que un tramo de código
+sin `await` es indivisible y no hacen falta locks. También aprendí que asyncio no sirve
+para todo: un cálculo pesado sin `await` congela el event loop (en la medición 2 un `GET`
+tardó 4,6 s). Y descubrí el GIL: dentro de un mismo proceso solo un hilo ejecuta código
+Python a la vez, por eso para el trabajo CPU-bound no sirve un hilo y hace falta un proceso
+aparte, que tiene su propio GIL.
 
-- **El GIL.** No sabía que el GIL (Global Interpreter Lock) hace que, dentro de un mismo
-  proceso, un solo hilo ejecute código Python a la vez. Por eso un hilo no sirve para
-  trabajo CPU-bound y hace falta un proceso aparte (`ProcessPoolExecutor`), que tiene su
-  propio GIL y puede usar otro núcleo.
+Aprendí a desconfiar de las mediciones hasta entender de dónde sale el número. En la
+medición 1 la versión con `gather` tardó 2 s en vez de 1 s, y la causa era el backlog de 5
+conexiones del servidor de prueba, no mi código. También entendí mejor la diferencia entre
+`gather` y un `for` con `await`: ninguno bloquea el loop, pero el `for` espera a terminar
+cada descarga antes de pedir la siguiente. En la medición 3 vi que con muchos workers el
+cuello de botella se mueve a la API, porque todos los `POST` pasan por un único event loop.
+
+Un bug real que encontré gracias a medir: si la cola estaba llena, el `POST` registraba la
+tarea antes de encolarla y quedaba una tarea fantasma `pendiente` que nadie ejecutaba; lo
+arreglé encolando primero y registrando después. Y una cosa más chica: `asyncio` es parte
+de la biblioteca estándar y vive en el Python del sistema, no en el `venv`, que solo guarda
+lo que instalo con `pip`.
