@@ -63,6 +63,24 @@ Variables de entorno (valores por defecto entre paréntesis):
 | `GRACE_APAGADO` (10) | Segundos que se espera a las tareas en curso al apagar |
 | `DIRECTORIO_ESTADO` (`.`) | Carpeta donde se escribe `estado_<timestamp>.json` |
 
+### Tests
+
+Tests de cancelación y timeouts con `pytest-asyncio` (cada test levanta la app completa,
+con su cola y sus workers, y le habla por HTTP en memoria):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Cubren: cancelar una tarea pendiente y una en ejecución, que el worker siga vivo después
+de cancelar, los códigos 404 y 409, el timeout, que `ejecutar()` relance `CancelledError`
+(la tarea figura como cancelada para asyncio) y que al cancelar una descarga se cierren
+**todas** las conexiones, tanto la que estaba a mitad de respuesta como las ociosas del
+pool. Para comprobar que los tests sirven, se rompió el código a propósito (no cancelar,
+no relanzar `CancelledError`, quitar el `async with`) y cada rotura hizo fallar al menos un
+test.
+
 ### Apagado ordenado
 
 `SIGTERM` / `SIGINT` (por ejemplo `docker compose stop`): se deja de aceptar tareas,
@@ -80,6 +98,8 @@ app/
 ├── cola.py          # Pool de workers que consumen la asyncio.Queue
 ├── tareas.py        # La lógica de cada tipo de tarea (esperar, hashear, descargar)
 └── persistencia.py  # Volcado a JSON al apagar y reporte al arrancar
+mediciones/          # Scripts de las tres mediciones (sección 5)
+tests/               # Tests de cancelación con pytest-asyncio
 Dockerfile
 docker-compose.yml
 ```
@@ -138,7 +158,8 @@ Flujo de una tarea:
   corriendo ni recursos abiertos. Si está `ejecutando`, `DELETE` llama a `Task.cancel()`,
   que lanza `CancelledError` en el `await` donde estaba pausada. Ese error sube por la
   corrutina: los `async with` y `finally` liberan los recursos (por ejemplo, el cliente
-  `httpx` de `descargar` cierra sus conexiones), y al llegar a `ejecutar()` se captura
+  `httpx` de `descargar` cierra todo su pool de conexiones; la que estaba a mitad de
+  respuesta la cierra `httpx` al cancelarse, y las ociosas las cierra el `async with`), y al llegar a `ejecutar()` se captura
   para dejar el estado en `cancelada` y se relanza para que la cancelación termine bien.
   `DELETE` espera con `asyncio.wait` a que esto ocurra y responde con el estado real.
   Cada tarea corre en su propio `asyncio.Task` para poder cancelarla sin matar al worker.
