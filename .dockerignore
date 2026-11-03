@@ -7,3 +7,6 @@ prompt_tutor_ia.md
 estado_*.json
 datos/
 mediciones/
+tests/
+requirements-dev.txt
+pytest.ini
